@@ -8,7 +8,7 @@ exchange:
   # - "dummy" -> random walk (para testes locais)
   # - "rest"  -> Binance via HTTP
   # - "ws"    -> Binance via WebSocket (mais próximo de HFT)
-  datafeed: "dummy"
+  datafeed: "dummy_orderbook"
 
   name: "binance"
 
@@ -108,3 +108,4 @@ backtest:
   initial_equity: 1000.0    # capital inicial simulado
   fee_rate: 0.0004          # taxa proporcional (ex.: 0.0004 = 0,04%)
   slippage_bps: 0.0         # slippage em basis points (0.0 = desabilitado)
+
