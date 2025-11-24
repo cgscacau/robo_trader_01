@@ -14,6 +14,8 @@ from core.inventory import InventoryLimits, InventoryRiskManager
 from core.logging_utils import setup_logging
 from core.engine import TradingEngine, EngineEvent
 
+from core.datafeed_dummy_orderbook import UltraDummyOrderBookFeed
+
 from strategies.simple_maker_taker import (
     SimpleMakerTakerStrategy,
     SimpleMakerTakerConfig,
@@ -74,13 +76,48 @@ def build_inventory_manager(risk_cfg: dict) -> InventoryRiskManager:
 
 
 def build_datafeed(exchange_cfg: dict):
+    """
+    Fabrica o datafeed de acordo com o provider + tipo definidos no YAML.
+
+    Suporte atual:
+      - provider: dummy
+          datafeed: dummy            -> DummyDataFeed (apenas last)
+          datafeed: dummy_orderbook  -> UltraDummyOrderBookFeed (order book completo)
+      - provider: binance
+          datafeed: rest             -> BinanceDepthDataFeed (REST)
+          datafeed: ws               -> BinanceWebSocketDataFeed (WebSocket)
+    """
     provider = exchange_cfg.get("provider", "dummy")
     datafeed_type = exchange_cfg.get("datafeed", "dummy")
     symbol = exchange_cfg["symbol"]
 
-    if provider == "dummy" or datafeed_type == "dummy":
-        return DummyDataFeed(symbol=symbol, start_price=100000.0, tick_sleep=0.5)
+    # ----------- PROVIDER DUMMY (LAB / SIMULAÇÃO) ----------- #
+    if provider == "dummy":
+        if datafeed_type in ("dummy", "dummy_trades"):
+            # feed simples, só last (bom para estratégias de preço baseadas em last)
+            return DummyDataFeed(
+                symbol=symbol,
+                start_price=exchange_cfg.get("start_price", 100000.0),
+                tick_sleep=exchange_cfg.get("tick_sleep", 0.0),
+            )
 
+        elif datafeed_type == "dummy_orderbook":
+            # feed avançado, com order book e microestrutura
+            return UltraDummyOrderBookFeed(
+                symbol=symbol,
+                start_price=exchange_cfg.get("start_price", 100000.0),
+                tick_sleep=exchange_cfg.get("tick_sleep", 0.0),
+                volatility=exchange_cfg.get("volatility", 0.0005),
+                base_spread_ticks=exchange_cfg.get("base_spread_ticks", 1.0),
+                depth_levels=exchange_cfg.get("depth_levels", 5),
+                base_liquidity=exchange_cfg.get("base_liquidity", 1.0),
+                seed=exchange_cfg.get("seed"),
+            )
+
+        else:
+            raise ValueError(f"Tipo de datafeed dummy desconhecido: {datafeed_type}")
+
+    # ----------- PROVIDER BINANCE ----------- #
     if provider == "binance":
         market_type = exchange_cfg.get("market_type", "futures")
 
@@ -93,20 +130,20 @@ def build_datafeed(exchange_cfg: dict):
             return BinanceDepthDataFeed(
                 symbol=symbol,
                 base_url=base_url,
-                tick_sleep=0.5,
-                limit=5,
+                tick_sleep=exchange_cfg.get("tick_sleep", 0.5),
+                limit=exchange_cfg.get("depth_limit", 5),
             )
 
         elif datafeed_type == "ws":
             return BinanceWebSocketDataFeed(
                 symbol=symbol,
                 market_type=market_type,
-                levels=5,
-                speed="100ms",
+                levels=exchange_cfg.get("depth_levels", 5),
+                speed=exchange_cfg.get("ws_speed", "100ms"),
             )
 
         else:
-            raise ValueError(f"Tipo de datafeed desconhecido: {datafeed_type}")
+            raise ValueError(f"Tipo de datafeed binance desconhecido: {datafeed_type}")
 
     raise ValueError(f"Provider de exchange desconhecido: {provider}")
 
@@ -262,7 +299,7 @@ def main():
     # 5) Posição
     pos_manager = PositionManager()
 
-    # 6) Engine de trading (novo)
+    # 6) Engine de trading
     engine = TradingEngine(
         symbol=symbol,
         strategy=strategy,
