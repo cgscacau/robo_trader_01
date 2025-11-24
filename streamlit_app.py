@@ -1,6 +1,5 @@
 # streamlit_app.py
 
-import io
 from typing import List, Dict, Any
 
 import streamlit as st
@@ -62,6 +61,9 @@ def init_engine_and_data(strategy_cfg: Dict[str, Any]):
     st.session_state.pnl_history: List[Dict[str, float]] = []
     st.session_state.trades: List[Dict[str, Any]] = []
 
+    # log simples de eventos (erros, rejeições etc.)
+    st.session_state.event_log: List[Dict[str, Any]] = []
+
     # equity fictícia para lab (1000 + realized_pnl)
     st.session_state.initial_equity = 1000.0
 
@@ -69,7 +71,7 @@ def init_engine_and_data(strategy_cfg: Dict[str, Any]):
 def process_n_ticks(n: int):
     """
     Processa N ticks usando o engine e atualiza
-    histórico de preço, PnL e trades em session_state.
+    histórico de preço, PnL, trades e log de eventos.
     """
     engine: TradingEngine = st.session_state.engine
     data_iter = st.session_state.data_iter
@@ -104,14 +106,87 @@ def process_n_ticks(n: int):
         for ev in events:
             if ev.type == "trade_executed":
                 st.session_state.trades.append(ev.data)
+                st.session_state.event_log.append(
+                    {
+                        "ts": ts,
+                        "type": "trade_executed",
+                        "msg": f"{ev.data['side']} {ev.data['size']} @ {ev.data['price']}",
+                        "tag": ev.data.get("signal_tag"),
+                    }
+                )
             elif ev.type == "signal_rejected":
-                # Poderíamos salvar aqui se quiser analisar rejeições depois
-                pass
+                st.session_state.event_log.append(
+                    {
+                        "ts": ts,
+                        "type": "signal_rejected",
+                        "msg": ev.data.get("reason", "") + " – " + ev.data.get("error", ""),
+                        "tag": ev.data.get("signal_tag"),
+                    }
+                )
             elif ev.type == "circuit_breaker":
+                st.session_state.event_log.append(
+                    {
+                        "ts": ts,
+                        "type": "circuit_breaker",
+                        "msg": ev.data.get("message", ""),
+                        "tag": None,
+                    }
+                )
                 st.warning(f"Circuit breaker disparado: {ev.data.get('message')}")
                 return
             elif ev.type == "error":
+                st.session_state.event_log.append(
+                    {
+                        "ts": ts,
+                        "type": "error",
+                        "msg": ev.data.get("message", ""),
+                        "tag": ev.data.get("signal_tag"),
+                    }
+                )
                 st.error(f"Erro na engine: {ev.data.get('message')}")
+
+
+def compute_metrics() -> Dict[str, float]:
+    """
+    Calcula métricas básicas a partir dos trades e da curva de PnL.
+    """
+    trades = st.session_state.trades
+    pnl_hist = st.session_state.pnl_history
+
+    total_trades = len(trades)
+    if total_trades == 0:
+        return {
+            "net_pnl": 0.0,
+            "win_rate": 0.0,
+            "max_drawdown": 0.0,
+            "total_trades": 0,
+        }
+
+    # PnL por trade
+    pnls = [float(t.get("trade_pnl", 0.0)) for t in trades]
+    wins = sum(1 for x in pnls if x > 0)
+    losses = sum(1 for x in pnls if x < 0)
+    win_rate = (wins / total_trades) * 100.0 if total_trades > 0 else 0.0
+    net_pnl = sum(pnls)
+
+    # Max drawdown na equity simulada
+    max_dd = 0.0
+    if pnl_hist:
+        eq_series = [row["equity"] for row in pnl_hist]
+        max_eq = eq_series[0]
+        for eq in eq_series:
+            if eq > max_eq:
+                max_eq = eq
+            dd = max_eq - eq
+            if dd > max_dd:
+                max_dd = dd
+
+    return {
+        "net_pnl": net_pnl,
+        "win_rate": win_rate,
+        "max_drawdown": max_dd,
+        "total_trades": total_trades,
+    }
 
 
 # ----------------- UI ----------------- #
@@ -121,7 +196,7 @@ def main():
 
     st.title("🤖 Robô HFT – Laboratório em Streamlit (Modo Dummy)")
 
-    # Carrega YAML como base de configuração
+    # Carrega YAML base
     settings = load_settings("config/settings_example.yaml")
     exchange_cfg = settings["exchange"]
     yaml_strat_cfg = settings["strategy"]
@@ -135,7 +210,7 @@ def main():
         }
 
     # ------------------------------------------- #
-    # Sidebar: escolha da estratégia e parâmetros
+    # Sidebar: estratégia e parâmetros
     # ------------------------------------------- #
 
     st.sidebar.header("Configuração da Estratégia")
@@ -153,14 +228,12 @@ def main():
     current_name = current_strategy_cfg.get("name", yaml_strat_cfg.get("name", "simple_maker_taker"))
     current_params = current_strategy_cfg.get("params", yaml_strat_params)
 
-    # Seleção de estratégia
     strategy_name = st.sidebar.selectbox(
         "Estratégia",
         options=strategy_options,
         index=strategy_options.index(current_name) if current_name in strategy_options else 0,
     )
 
-    # Helper para pegar valor default (prioriza sessão, depois YAML, depois um default passado)
     def param_value(key: str, default: float | int | str) -> Any:
         if key in current_params:
             return current_params[key]
@@ -168,7 +241,6 @@ def main():
             return yaml_strat_params[key]
         return default
 
-    # Parâmetros específicos por estratégia
     new_params: Dict[str, Any] = dict(current_params)
 
     if strategy_name == "simple_maker_taker":
@@ -303,7 +375,7 @@ def main():
             "mr_max_z_cap", value=float(param_value("mr_max_z_cap", 5.0)), step=0.5
         )
 
-    # Atualiza a strategy_cfg da sessão com o que foi definido na sidebar
+    # Atualiza a strategy_cfg da sessão
     st.session_state.strategy_cfg = {"name": strategy_name, "params": new_params}
 
     # ------------------------------------------- #
@@ -311,13 +383,12 @@ def main():
     # ------------------------------------------- #
 
     if "engine" not in st.session_state:
-        # Usa a estratégia escolhida na UI para inicializar a engine
         init_engine_and_data(st.session_state.strategy_cfg)
 
     engine: TradingEngine = st.session_state.engine
 
     # ------------------------------------------- #
-    # Controles adicionais na sidebar
+    # Controles de execução
     # ------------------------------------------- #
 
     st.sidebar.markdown("---")
@@ -341,7 +412,6 @@ def main():
         process_n_ticks(int(step_ticks))
 
     if col_b2.button("🔁 Resetar (aplicar estratégia)", use_container_width=True):
-        # Reinicializa engine e históricos com a estratégia atual da UI
         init_engine_and_data(st.session_state.strategy_cfg)
         st.experimental_rerun()
 
@@ -350,10 +420,7 @@ def main():
         "para recriar o engine com essa configuração."
     )
 
-    # ------------------------------------------- #
-    # Estado atual do engine
-    # ------------------------------------------- #
-
+    # Estado do engine
     snap = engine.snapshot()
     st.sidebar.markdown("---")
     st.sidebar.subheader("Estado do Engine")
@@ -368,10 +435,25 @@ def main():
     if snap["last_error"]:
         st.sidebar.error(f"Erro recente: {snap['last_error']}")
 
-    # ----------------- Layout principal ----------------- #
+    # ------------------------------------------- #
+    # MÉTRICAS GERAIS (topo da página)
+    # ------------------------------------------- #
 
-    tab_price, tab_pnl, tab_trades, tab_signals = st.tabs(
-        ["📈 Preço", "💰 PnL / Equity", "📜 Trades", "📡 Últimos sinais"]
+    metrics = compute_metrics()
+    st.subheader("📊 Métricas gerais do robô (sessão atual)")
+
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("PnL líquido", f"{metrics['net_pnl']:.4f}")
+    mc2.metric("Win rate", f"{metrics['win_rate']:.2f}%")
+    mc3.metric("Max Drawdown", f"{metrics['max_drawdown']:.4f}")
+    mc4.metric("Trades", metrics["total_trades"])
+
+    st.markdown("---")
+
+    # ----------------- Tabs principais ----------------- #
+
+    tab_price, tab_pnl, tab_trades, tab_signals, tab_events = st.tabs(
+        ["📈 Preço", "💰 PnL / Equity", "📜 Trades", "📡 Sinais", "📝 Eventos"]
     )
 
     # Tab preço
@@ -379,8 +461,7 @@ def main():
         st.subheader("Preço (last) ao longo dos ticks")
         if st.session_state.price_history:
             price_df = pd.DataFrame(st.session_state.price_history)
-            price_df = price_df.sort_values("ts")
-            price_df.set_index("ts", inplace=True)
+            price_df = price_df.sort_values("ts").set_index("ts")
             st.line_chart(price_df["last"])
         else:
             st.info("Ainda não há dados de preço. Clique em 'Rodar' na barra lateral.")
@@ -388,7 +469,6 @@ def main():
     # Tab PnL / Equity
     with tab_pnl:
         st.subheader("PnL realizado e Equity (fictícia: 1000 + PnL)")
-
         if st.session_state.pnl_history:
             pnl_df = pd.DataFrame(st.session_state.pnl_history)
             pnl_df = pnl_df.sort_values("ts").set_index("ts")
@@ -406,7 +486,6 @@ def main():
     # Tab trades
     with tab_trades:
         st.subheader("Trades executados (simulados)")
-
         if st.session_state.trades:
             trades_df = pd.DataFrame(st.session_state.trades)
             st.dataframe(trades_df)
@@ -415,13 +494,23 @@ def main():
 
     # Tab sinais
     with tab_signals:
-        st.subheader("Últimos sinais da estratégia (instantâneo do engine)")
+        st.subheader("Últimos sinais da estratégia (snapshot)")
         last_signals = snap["last_signals"]
         if last_signals:
             sig_df = pd.DataFrame(last_signals)
             st.dataframe(sig_df)
         else:
             st.info("Nenhum sinal gerado ainda ou ainda não processado.")
+
+    # Tab eventos
+    with tab_events:
+        st.subheader("Log de eventos (trades, rejeições, erros, circuit breaker)")
+        if st.session_state.event_log:
+            events_df = pd.DataFrame(st.session_state.event_log)
+            events_df = events_df.sort_values("ts", ascending=False)
+            st.dataframe(events_df)
+        else:
+            st.info("Nenhum evento registrado ainda.")
 
 
 if __name__ == "__main__":
