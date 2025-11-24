@@ -413,7 +413,7 @@ def main():
 
     if col_b2.button("🔁 Resetar (aplicar estratégia)", use_container_width=True):
         init_engine_and_data(st.session_state.strategy_cfg)
-        st.experimental_rerun()
+        st.rerun()  # <--- CORRIGIDO AQUI
 
     st.sidebar.info(
         "Ao alterar a estratégia ou parâmetros, clique em **Resetar** "
