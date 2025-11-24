@@ -1,29 +1,23 @@
 exchange:
-  # Provedor de dados/execução:
-  # - "dummy"   -> tudo simulado, sem acessar internet
-  # - "binance" -> usa Binance (spot ou futures)
-  provider: "dummy"
+  # >>> Para dados reais via Binance WebSocket
+  provider: binance          # antes estava "dummy"
+  datafeed: ws               # usa o BinanceWebSocketDataFeed
+  symbol: BTCUSDT
+  market_type: futures       # ou "spot"
 
-  # Tipo de datafeed (para rodar o app em tempo real):
-  # - "dummy" -> random walk (para testes locais)
-  # - "rest"  -> Binance via HTTP
-  # - "ws"    -> Binance via WebSocket (mais próximo de HFT)
-  datafeed: "dummy_orderbook"
+  # parâmetros do depth
+  depth_levels: 10           # N níveis de book por lado
+  ws_speed: "100ms"          # "100ms" ou "1000ms"
 
-  name: "binance"
+  # endpoints (opcionais; só mexa se souber o que está fazendo)
+  # ws_base_url_spot: "wss://stream.binance.com:9443/ws"
+  # ws_base_url_futures: "wss://fstream.binance.com/ws"
 
-  # URLs base (usadas para alguns clientes mock e futuros usos)
-  base_url_spot: "https://api.binance.com"
-  base_url_futures: "https://fapi.binance.com"
-
-  # IMPORTANTE: substitua pelas suas chaves de TESTNET quando usar Binance de verdade
+  # Para execução (ainda em dry_run por segurança)
   api_key: "SUA_API_KEY_AQUI"
   api_secret: "SEU_API_SECRET_AQUI"
+  testnet: true             # mantenha true enquanto for laboratório
 
-  symbol: "BTCUSDT"
-  market_type: "futures"     # "spot" ou "futures"
-  testnet: true
-  recv_window: 5000
 
 strategy:
   # Estratégias disponíveis:
@@ -108,4 +102,5 @@ backtest:
   initial_equity: 1000.0    # capital inicial simulado
   fee_rate: 0.0004          # taxa proporcional (ex.: 0.0004 = 0,04%)
   slippage_bps: 0.0         # slippage em basis points (0.0 = desabilitado)
+
 
