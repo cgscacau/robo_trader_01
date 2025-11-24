@@ -1,0 +1,110 @@
+exchange:
+  # Provedor de dados/execução:
+  # - "dummy"   -> tudo simulado, sem acessar internet
+  # - "binance" -> usa Binance (spot ou futures)
+  provider: "dummy"
+
+  # Tipo de datafeed (para rodar o app em tempo real):
+  # - "dummy" -> random walk (para testes locais)
+  # - "rest"  -> Binance via HTTP
+  # - "ws"    -> Binance via WebSocket (mais próximo de HFT)
+  datafeed: "dummy"
+
+  name: "binance"
+
+  # URLs base (usadas para alguns clientes mock e futuros usos)
+  base_url_spot: "https://api.binance.com"
+  base_url_futures: "https://fapi.binance.com"
+
+  # IMPORTANTE: substitua pelas suas chaves de TESTNET quando usar Binance de verdade
+  api_key: "SUA_API_KEY_AQUI"
+  api_secret: "SEU_API_SECRET_AQUI"
+
+  symbol: "BTCUSDT"
+  market_type: "futures"     # "spot" ou "futures"
+  testnet: true
+  recv_window: 5000
+
+strategy:
+  # Estratégias disponíveis:
+  # - "simple_maker_taker"
+  # - "market_maker_v1"
+  # - "market_maker_v2"
+  # - "micro_momentum_v1"
+  # - "imbalance_v1"
+  # - "mean_reversion_v1"
+  name: "mean_reversion_v1"
+
+  params:
+    # ---------- parâmetros para Market Maker (caso use) ----------
+    min_spread: 1.0           # spread mínimo absoluto
+    max_spread: 15.0          # spread máximo absoluto
+    spread_pct: 0.0           # se > 0, usa % do mid como base do spread
+    quote_size: 0.001         # tamanho de cada ordem
+    tick_interval: 5          # gera ordens a cada N ticks
+    vol_window: 50            # (MM V2) nº de mids p/ volatilidade
+    vol_factor: 1.0           # (MM V2) peso da vol. no spread
+
+    # ---------- parâmetros do Micro-Momentum V1 ----------
+    lookback_ticks: 10
+    min_moves: 3
+    min_return: 0.0005
+    order_size: 0.001
+    cooldown_ticks: 10
+    side_bias: "both"         # "both", "long_only", "short_only"
+
+    # ---------- parâmetros do Imbalance V1 ----------
+    imbalance_threshold: 0.6  # |imbalance| mínimo (0 a 1) para acionar
+    min_total_size: 1.0       # tamanho mínimo (bid+ask) para considerar confiável
+    imbalance_order_size: 0.001
+    imbalance_cooldown_ticks: 5
+    imbalance_side_bias: "both"  # "both", "long_only", "short_only"
+
+    # ---------- parâmetros do Mean Reversion V1 ----------
+    mr_lookback_ticks: 20        # janela de preço para média/desvio
+    mr_z_threshold: 2.0          # gatilho de |z-score| (ex.: 2.0 = 2 desvios)
+    mr_order_size: 0.001
+    mr_cooldown_ticks: 10
+    mr_side_bias: "both"         # "both", "long_only", "short_only"
+    mr_max_z_cap: 5.0            # limita |z| pra evitar extremos bizarros
+
+risk:
+  max_daily_loss_pct: 2.0       # perda máxima diária em %
+  max_daily_loss_value: 50.0    # perda máxima diária em valor absoluto
+  max_position_size_pct: 10.0   # % máxima do equity em uma posição
+  max_open_trades: 3            # nº máximo de trades simultâneos
+
+  circuit_breaker:
+    enabled: true
+    hit_action: "STOP_ALL"
+
+  inventory:
+    max_abs_qty: 0.02           # máximo de BTC (ou ativo) em posição líquida
+    max_notional_pct: 30.0      # % máxima do equity concentrada na posição líquida
+
+logging:
+  level: "INFO"                 # "DEBUG", "INFO", "WARNING", "ERROR"
+  file: "logs/hft_bot.log"      # arquivo de log (será criado se não existir)
+  json: true                    # true = log em JSON (bom p/ análise futura)
+
+trading:
+  dry_run: true                 # true = NÃO envia ordem real (simulação)
+
+# --------- NOVO: CONFIG DE DADOS PARA BACKTEST ---------
+data:
+  csv_path: "data/btcusdt_ticks.csv"  # caminho para o CSV de histórico
+  symbol: "BTCUSDT"
+
+  # nomes das colunas no CSV
+  time_column: "timestamp"
+  bid_column: "bid"
+  ask_column: "ask"
+  last_column: "last"
+  bid_size_column: "bid_size"
+  ask_size_column: "ask_size"
+
+# --------- NOVO: PARAMETROS DO BACKTEST ---------
+backtest:
+  initial_equity: 1000.0    # capital inicial simulado
+  fee_rate: 0.0004          # taxa proporcional (ex.: 0.0004 = 0,04%)
+  slippage_bps: 0.0         # slippage em basis points (0.0 = desabilitado)
