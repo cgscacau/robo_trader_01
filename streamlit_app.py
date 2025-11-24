@@ -19,20 +19,31 @@ from core.position import PositionManager
 
 # ----------------- Helpers ----------------- #
 
-def init_engine_and_data(strategy_cfg: Dict[str, Any]):
+def init_engine_and_data(
+    strategy_cfg: Dict[str, Any],
+    exchange_override: Dict[str, Any] | None = None,
+):
     """
     Inicializa engine, datafeed e históricos na sessão do Streamlit,
-    usando a estratégia definida em strategy_cfg (vinda da UI).
+    usando:
+      - strategy_cfg vindo da UI
+      - exchange_cfg = YAML + override vindo da UI (para provider dummy)
     """
     settings = load_settings("config/settings_example.yaml")
 
-    exchange_cfg = settings["exchange"]
+    base_exchange_cfg = settings["exchange"]
     risk_cfg = settings["risk"]
     trading_cfg = settings.get("trading", {})
 
+    # Aplica override de exchange se existir (somente em memória do app)
+    if exchange_override:
+        exchange_cfg = {**base_exchange_cfg, **exchange_override}
+    else:
+        exchange_cfg = base_exchange_cfg
+
     symbol = exchange_cfg["symbol"]
 
-    # Constrói componentes core com a estratégia escolhida na UI
+    # Constrói componentes core
     strategy = build_strategy(symbol, strategy_cfg)
     risk_manager = build_risk_manager(risk_cfg)
     inventory_manager = build_inventory_manager(risk_cfg)
@@ -60,12 +71,13 @@ def init_engine_and_data(strategy_cfg: Dict[str, Any]):
     st.session_state.price_history: List[Dict[str, float]] = []
     st.session_state.pnl_history: List[Dict[str, float]] = []
     st.session_state.trades: List[Dict[str, Any]] = []
-
-    # log simples de eventos (erros, rejeições etc.)
     st.session_state.event_log: List[Dict[str, Any]] = []
 
     # equity fictícia para lab (1000 + realized_pnl)
     st.session_state.initial_equity = 1000.0
+
+    # guarda a exchange_cfg efetiva (pós override) para mostrar na UI
+    st.session_state.exchange_effective_cfg = exchange_cfg
 
 
 def process_n_ticks(n: int):
@@ -162,14 +174,11 @@ def compute_metrics() -> Dict[str, float]:
             "total_trades": 0,
         }
 
-    # PnL por trade
     pnls = [float(t.get("trade_pnl", 0.0)) for t in trades]
     wins = sum(1 for x in pnls if x > 0)
-    losses = sum(1 for x in pnls if x < 0)
     win_rate = (wins / total_trades) * 100.0 if total_trades > 0 else 0.0
     net_pnl = sum(pnls)
 
-    # Max drawdown na equity simulada
     max_dd = 0.0
     if pnl_hist:
         eq_series = [row["equity"] for row in pnl_hist]
@@ -198,9 +207,11 @@ def main():
 
     # Carrega YAML base
     settings = load_settings("config/settings_example.yaml")
-    exchange_cfg = settings["exchange"]
+    base_exchange_cfg = settings["exchange"]
     yaml_strat_cfg = settings["strategy"]
     yaml_strat_params = yaml_strat_cfg.get("params", {})
+
+    provider = base_exchange_cfg.get("provider", "dummy")
 
     # Inicializa strategy_cfg na sessão, se ainda não existir
     if "strategy_cfg" not in st.session_state:
@@ -208,6 +219,10 @@ def main():
             "name": yaml_strat_cfg.get("name", "simple_maker_taker"),
             "params": dict(yaml_strat_params),
         }
+
+    # Inicializa override de exchange na sessão (para provider dummy)
+    if "exchange_override" not in st.session_state:
+        st.session_state.exchange_override = {}
 
     # ------------------------------------------- #
     # Sidebar: estratégia e parâmetros
@@ -379,13 +394,99 @@ def main():
     st.session_state.strategy_cfg = {"name": strategy_name, "params": new_params}
 
     # ------------------------------------------- #
+    # Sidebar: parâmetros de mercado (apenas dummy)
+    # ------------------------------------------- #
+
+    st.sidebar.markdown("---")
+    st.sidebar.header("Mercado (modo dummy)")
+
+    exchange_override: Dict[str, Any] = dict(st.session_state.exchange_override)
+
+    if provider == "dummy":
+        # tipo de feed dummy
+        datafeed_default = base_exchange_cfg.get("datafeed", "dummy_orderbook")
+        datafeed_current = exchange_override.get("datafeed", datafeed_default)
+
+        datafeed_type = st.sidebar.selectbox(
+            "Tipo de datafeed dummy",
+            options=["dummy", "dummy_orderbook"],
+            index=["dummy", "dummy_orderbook"].index(datafeed_current)
+            if datafeed_current in ["dummy", "dummy_orderbook"]
+            else ["dummy", "dummy_orderbook"].index(datafeed_default),
+        )
+        exchange_override["datafeed"] = datafeed_type
+
+        # parâmetros comuns
+        start_price = st.sidebar.number_input(
+            "Preço inicial (mid)",
+            value=float(exchange_override.get("start_price", base_exchange_cfg.get("start_price", 100000.0))),
+            step=100.0,
+            format="%.2f",
+        )
+        tick_sleep = st.sidebar.number_input(
+            "tick_sleep (s)",
+            value=float(exchange_override.get("tick_sleep", base_exchange_cfg.get("tick_sleep", 0.0))),
+            step=0.01,
+            format="%.2f",
+            min_value=0.0,
+        )
+
+        exchange_override["start_price"] = start_price
+        exchange_override["tick_sleep"] = tick_sleep
+
+        # parâmetros específicos do orderbook avançado
+        if datafeed_type == "dummy_orderbook":
+            volatility = st.sidebar.number_input(
+                "Volatilidade base (%)",
+                value=float(100 * exchange_override.get("volatility", base_exchange_cfg.get("volatility", 0.0005))),
+                step=0.01,
+                format="%.2f",
+            )
+            base_spread_ticks = st.sidebar.number_input(
+                "Spread médio (ticks)",
+                value=float(exchange_override.get("base_spread_ticks", base_exchange_cfg.get("base_spread_ticks", 1.0))),
+                step=0.1,
+                format="%.2f",
+            )
+            depth_levels = st.sidebar.number_input(
+                "Níveis do book por lado",
+                value=int(exchange_override.get("depth_levels", base_exchange_cfg.get("depth_levels", 5))),
+                step=1,
+                min_value=1,
+                max_value=50,
+            )
+            base_liquidity = st.sidebar.number_input(
+                "Liquidez base por nível",
+                value=float(exchange_override.get("base_liquidity", base_exchange_cfg.get("base_liquidity", 1.0))),
+                step=0.1,
+                format="%.2f",
+            )
+
+            exchange_override["volatility"] = volatility / 100.0  # converte % -> fração
+            exchange_override["base_spread_ticks"] = base_spread_ticks
+            exchange_override["depth_levels"] = depth_levels
+            exchange_override["base_liquidity"] = base_liquidity
+
+        # salva override na sessão
+        st.session_state.exchange_override = exchange_override
+    else:
+        st.sidebar.info(
+            "Parâmetros de mercado só são editáveis em modo dummy.\n"
+            "Para Binance / produção, use o YAML."
+        )
+
+    # ------------------------------------------- #
     # Inicialização do engine (primeira vez)
     # ------------------------------------------- #
 
     if "engine" not in st.session_state:
-        init_engine_and_data(st.session_state.strategy_cfg)
+        init_engine_and_data(
+            st.session_state.strategy_cfg,
+            st.session_state.exchange_override if provider == "dummy" else None,
+        )
 
     engine: TradingEngine = st.session_state.engine
+    effective_exchange_cfg = st.session_state.get("exchange_effective_cfg", base_exchange_cfg)
 
     # ------------------------------------------- #
     # Controles de execução
@@ -394,9 +495,9 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.header("Execução (modo lab / dummy)")
 
-    st.sidebar.write(f"**Símbolo:** `{exchange_cfg['symbol']}`")
-    st.sidebar.write(f"**Provider (YAML):** `{exchange_cfg.get('provider', 'dummy')}`")
-    st.sidebar.write(f"**Datafeed (YAML):** `{exchange_cfg.get('datafeed', 'dummy')}`")
+    st.sidebar.write(f"**Símbolo:** `{effective_exchange_cfg['symbol']}`")
+    st.sidebar.write(f"**Provider (YAML):** `{base_exchange_cfg.get('provider', 'dummy')}`")
+    st.sidebar.write(f"**Datafeed efetivo:** `{effective_exchange_cfg.get('datafeed', 'dummy')}`")
     st.sidebar.write(f"**Estratégia ativa no engine:** `{st.session_state.strategy_cfg['name']}`")
 
     step_ticks = st.sidebar.number_input(
@@ -411,12 +512,15 @@ def main():
     if col_b1.button("▶ Rodar", use_container_width=True):
         process_n_ticks(int(step_ticks))
 
-    if col_b2.button("🔁 Resetar (aplicar estratégia)", use_container_width=True):
-        init_engine_and_data(st.session_state.strategy_cfg)
-        st.rerun()  # <--- CORRIGIDO AQUI
+    if col_b2.button("🔁 Resetar (aplicar estratégia/mercado)", use_container_width=True):
+        init_engine_and_data(
+            st.session_state.strategy_cfg,
+            st.session_state.exchange_override if provider == "dummy" else None,
+        )
+        st.rerun()
 
     st.sidebar.info(
-        "Ao alterar a estratégia ou parâmetros, clique em **Resetar** "
+        "Ao alterar estratégia ou parâmetros de mercado, clique em **Resetar** "
         "para recriar o engine com essa configuração."
     )
 
