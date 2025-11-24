@@ -1,516 +1,349 @@
-# streamlit_app.py
+# app.py
 
-from typing import List, Dict, Any
+import yaml
+import logging
 
-import streamlit as st
-import pandas as pd
-
-from app import (
-    load_settings,
-    build_strategy,
-    build_risk_manager,
-    build_inventory_manager,
-    build_datafeed,
-    build_execution_client,
-)
-from core.engine import TradingEngine, EngineEvent
+from core.risk import RiskLimits, RiskManager
+from core.execution import ExecutionClient   # mock genérico
+from core.datafeed import DummyDataFeed
+from core.datafeed_binance import BinanceDepthDataFeed
+from core.datafeed_ws_binance import BinanceWebSocketDataFeed
+from core.execution_binance import BinanceExecutionClient
 from core.position import PositionManager
+from core.inventory import InventoryLimits, InventoryRiskManager
+from core.logging_utils import setup_logging
+from core.engine import TradingEngine, EngineEvent
+
+from core.datafeed_dummy_orderbook import UltraDummyOrderBookFeed
+
+from strategies.simple_maker_taker import (
+    SimpleMakerTakerStrategy,
+    SimpleMakerTakerConfig,
+)
+from strategies.market_maker_v1 import (
+    MarketMakerV1,
+    MarketMakerV1Config,
+)
+from strategies.market_maker_v2 import (
+    MarketMakerV2,
+    MarketMakerV2Config,
+)
+from strategies.micro_momentum_v1 import (
+    MicroMomentumV1,
+    MicroMomentumV1Config,
+)
+from strategies.imbalance_v1 import (
+    ImbalanceV1,
+    ImbalanceV1Config,
+)
+from strategies.mean_reversion_v1 import (
+    MeanReversionV1,
+    MeanReversionV1Config,
+)
 
 
-# ----------------- Helpers ----------------- #
+# ------------------------------------------------------------------ #
+# Carregamento de configuração
+# ------------------------------------------------------------------ #
 
-def init_engine_and_data(strategy_cfg: Dict[str, Any]):
+def load_settings(path: str = "config/settings_example.yaml") -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+# ------------------------------------------------------------------ #
+# Builders de componentes
+# ------------------------------------------------------------------ #
+
+def build_risk_manager(risk_cfg: dict) -> RiskManager:
+    limits = RiskLimits(
+        max_daily_loss_pct=risk_cfg["max_daily_loss_pct"],
+        max_daily_loss_value=risk_cfg["max_daily_loss_value"],
+        max_position_size_pct=risk_cfg["max_position_size_pct"],
+        max_open_trades=risk_cfg["max_open_trades"],
+        circuit_breaker_enabled=risk_cfg["circuit_breaker"]["enabled"],
+    )
+    return RiskManager(limits)
+
+
+def build_inventory_manager(risk_cfg: dict) -> InventoryRiskManager:
+    inv_cfg = risk_cfg.get("inventory", {})
+    limits = InventoryLimits(
+        max_abs_qty=inv_cfg.get("max_abs_qty", 0.02),
+        max_notional_pct=inv_cfg.get("max_notional_pct", 30.0),
+    )
+    return InventoryRiskManager(limits)
+
+
+def build_datafeed(exchange_cfg: dict):
     """
-    Inicializa engine, datafeed e históricos na sessão do Streamlit,
-    usando a estratégia definida em strategy_cfg (vinda da UI).
+    Fabrica o datafeed de acordo com o provider + tipo definidos no YAML.
+
+    Suporte atual:
+      - provider: dummy
+          datafeed: dummy            -> DummyDataFeed (apenas last)
+          datafeed: dummy_orderbook  -> UltraDummyOrderBookFeed (order book completo)
+      - provider: binance
+          datafeed: rest             -> BinanceDepthDataFeed (REST)
+          datafeed: ws               -> BinanceWebSocketDataFeed (WebSocket)
     """
-    settings = load_settings("config/settings_example.yaml")
-
-    exchange_cfg = settings["exchange"]
-    risk_cfg = settings["risk"]
-    trading_cfg = settings.get("trading", {})
-
+    provider = exchange_cfg.get("provider", "dummy")
+    datafeed_type = exchange_cfg.get("datafeed", "dummy")
     symbol = exchange_cfg["symbol"]
 
-    # Constrói componentes core com a estratégia escolhida na UI
-    strategy = build_strategy(symbol, strategy_cfg)
-    risk_manager = build_risk_manager(risk_cfg)
-    inventory_manager = build_inventory_manager(risk_cfg)
-    execution_client = build_execution_client(exchange_cfg, trading_cfg)
+    # ----------- PROVIDER DUMMY (LAB / SIMULAÇÃO) ----------- #
+    if provider == "dummy":
+        if datafeed_type in ("dummy", "dummy_trades"):
+            # feed simples, só last (bom para estratégias de preço baseadas em last)
+            return DummyDataFeed(
+                symbol=symbol,
+                start_price=exchange_cfg.get("start_price", 100000.0),
+                tick_sleep=exchange_cfg.get("tick_sleep", 0.0),
+            )
+
+        elif datafeed_type == "dummy_orderbook":
+            # feed avançado, com order book e microestrutura
+            return UltraDummyOrderBookFeed(
+                symbol=symbol,
+                start_price=exchange_cfg.get("start_price", 100000.0),
+                tick_sleep=exchange_cfg.get("tick_sleep", 0.0),
+                volatility=exchange_cfg.get("volatility", 0.0005),
+                base_spread_ticks=exchange_cfg.get("base_spread_ticks", 1.0),
+                depth_levels=exchange_cfg.get("depth_levels", 5),
+                base_liquidity=exchange_cfg.get("base_liquidity", 1.0),
+                seed=exchange_cfg.get("seed"),
+            )
+
+        else:
+            raise ValueError(f"Tipo de datafeed dummy desconhecido: {datafeed_type}")
+
+    # ----------- PROVIDER BINANCE ----------- #
+    if provider == "binance":
+        market_type = exchange_cfg.get("market_type", "futures")
+
+        if datafeed_type == "rest":
+            if market_type == "spot":
+                base_url = "https://api.binance.com/api/v3"
+            else:
+                base_url = "https://fapi.binance.com/fapi/v1"
+
+            return BinanceDepthDataFeed(
+                symbol=symbol,
+                base_url=base_url,
+                tick_sleep=exchange_cfg.get("tick_sleep", 0.5),
+                limit=exchange_cfg.get("depth_limit", 5),
+            )
+
+        elif datafeed_type == "ws":
+            return BinanceWebSocketDataFeed(
+                symbol=symbol,
+                market_type=market_type,
+                levels=exchange_cfg.get("depth_levels", 5),
+                speed=exchange_cfg.get("ws_speed", "100ms"),
+            )
+
+        else:
+            raise ValueError(f"Tipo de datafeed binance desconhecido: {datafeed_type}")
+
+    raise ValueError(f"Provider de exchange desconhecido: {provider}")
+
+
+def build_execution_client(exchange_cfg: dict, trading_cfg: dict):
+    provider = exchange_cfg.get("provider", "dummy")
+    dry_run = trading_cfg.get("dry_run", True)
+
+    if provider == "dummy":
+        # Cliente mock já é, na prática, dry-run
+        return ExecutionClient(
+            base_url=exchange_cfg.get("base_url_spot", ""),
+            api_key=exchange_cfg.get("api_key", ""),
+            api_secret=exchange_cfg.get("api_secret", ""),
+            testnet=True,
+        )
+
+    elif provider == "binance":
+        return BinanceExecutionClient(
+            api_key=exchange_cfg["api_key"],
+            api_secret=exchange_cfg["api_secret"],
+            market_type=exchange_cfg.get("market_type", "futures"),
+            testnet=exchange_cfg.get("testnet", True),
+            recv_window=exchange_cfg.get("recv_window", 5000),
+            dry_run=dry_run,
+        )
+
+    else:
+        raise ValueError(f"Provider de exchange desconhecido: {provider}")
+
+
+def build_strategy(symbol: str, strategy_cfg: dict):
+    name = strategy_cfg.get("name", "simple_maker_taker")
+    params = strategy_cfg.get("params", {})
+
+    if name == "simple_maker_taker":
+        cfg = SimpleMakerTakerConfig(
+            min_spread=params.get("min_spread", 1.0),
+            order_size=params.get("order_size", 0.001),
+            tick_interval=params.get("tick_interval", 5),
+        )
+        return SimpleMakerTakerStrategy(symbol=symbol, config=cfg)
+
+    elif name == "market_maker_v1":
+        cfg = MarketMakerV1Config(
+            min_spread=params.get("min_spread", 1.0),
+            max_spread=params.get("max_spread", 10.0),
+            spread_pct=params.get("spread_pct", 0.0),
+            quote_size=params.get("quote_size", 0.001),
+            tick_interval=params.get("tick_interval", 5),
+        )
+        return MarketMakerV1(symbol=symbol, config=cfg)
+
+    elif name == "market_maker_v2":
+        cfg = MarketMakerV2Config(
+            min_spread=params.get("min_spread", 1.0),
+            max_spread=params.get("max_spread", 15.0),
+            spread_pct=params.get("spread_pct", 0.0),
+            quote_size=params.get("quote_size", 0.001),
+            tick_interval=params.get("tick_interval", 5),
+            vol_window=params.get("vol_window", 50),
+            vol_factor=params.get("vol_factor", 1.0),
+        )
+        return MarketMakerV2(symbol=symbol, config=cfg)
+
+    elif name == "micro_momentum_v1":
+        cfg = MicroMomentumV1Config(
+            lookback_ticks=params.get("lookback_ticks", 10),
+            min_moves=params.get("min_moves", 3),
+            min_return=params.get("min_return", 0.0005),
+            order_size=params.get("order_size", 0.001),
+            cooldown_ticks=params.get("cooldown_ticks", 10),
+            side_bias=params.get("side_bias", "both"),
+        )
+        return MicroMomentumV1(symbol=symbol, config=cfg)
+
+    elif name == "imbalance_v1":
+        cfg = ImbalanceV1Config(
+            imbalance_threshold=params.get("imbalance_threshold", 0.6),
+            min_total_size=params.get("min_total_size", 1.0),
+            order_size=params.get("imbalance_order_size", 0.001),
+            cooldown_ticks=params.get("imbalance_cooldown_ticks", 5),
+            side_bias=params.get("imbalance_side_bias", "both"),
+        )
+        return ImbalanceV1(symbol=symbol, config=cfg)
+
+    elif name == "mean_reversion_v1":
+        cfg = MeanReversionV1Config(
+            lookback_ticks=params.get("mr_lookback_ticks", 20),
+            z_threshold=params.get("mr_z_threshold", 2.0),
+            order_size=params.get("mr_order_size", 0.001),
+            cooldown_ticks=params.get("mr_cooldown_ticks", 10),
+            side_bias=params.get("mr_side_bias", "both"),
+            max_z_cap=params.get("mr_max_z_cap", 5.0),
+        )
+        return MeanReversionV1(symbol=symbol, config=cfg)
+
+    else:
+        raise ValueError(f"Estratégia desconhecida: {name}")
+
+
+# ------------------------------------------------------------------ #
+# Função principal (CLI)
+# ------------------------------------------------------------------ #
+
+def main():
+    # --------- Carrega config --------- #
+    settings = load_settings()
+    exchange_cfg = settings["exchange"]
+    risk_cfg = settings["risk"]
+    strat_cfg = settings.get("strategy", {})
+    logging_cfg = settings.get("logging", {})
+    trading_cfg = settings.get("trading", {})
+
+    # --------- Logging estruturado --------- #
+    setup_logging(
+        level=logging_cfg.get("level", "INFO"),
+        json_logs=logging_cfg.get("json", True),
+        filename=logging_cfg.get("file"),
+    )
+    logger = logging.getLogger("hft_bot")
+
+    symbol = exchange_cfg["symbol"]
+    provider = exchange_cfg.get("provider", "dummy")
+    datafeed_type = exchange_cfg.get("datafeed", "dummy")
+    strategy_name = strat_cfg.get("name", "simple_maker_taker")
+    dry_run = trading_cfg.get("dry_run", True)
+
+    logger.info(
+        "Inicializando bot.",
+        extra={
+            "symbol": symbol,
+            "provider": provider,
+            "datafeed": datafeed_type,
+            "strategy": strategy_name,
+            "dry_run": dry_run,
+        },
+    )
+
+    # 1) Riscos
+    risk = build_risk_manager(risk_cfg)
+    inv_risk = build_inventory_manager(risk_cfg)
+
+    # 2) Execução
+    exec_client = build_execution_client(exchange_cfg, trading_cfg)
+
+    # 3) Estratégia
+    strategy = build_strategy(symbol, strat_cfg)
+
+    # 4) Datafeed
+    datafeed = build_datafeed(exchange_cfg)
+
+    # 5) Posição
     pos_manager = PositionManager()
 
+    # 6) Engine de trading
     engine = TradingEngine(
         symbol=symbol,
         strategy=strategy,
-        risk_manager=risk_manager,
-        inventory_manager=inventory_manager,
-        execution_client=execution_client,
+        risk_manager=risk,
+        inventory_manager=inv_risk,
+        execution_client=exec_client,
         position_manager=pos_manager,
-        logger=None,
-        raise_on_circuit_breaker=False,
+        logger=logger,
+        raise_on_circuit_breaker=False,  # no CLI, vamos só parar o loop
     )
 
-    datafeed = build_datafeed(exchange_cfg)
-    data_iter = datafeed.ticks()
+    try:
+        for tick in datafeed.ticks():
+            events = engine.process_tick(tick)
 
-    st.session_state.engine = engine
-    st.session_state.data_iter = data_iter
+            # Processa eventos retornados pela engine
+            for ev in events:
+                if ev.type == "trade_executed":
+                    logger.info(
+                        "Trade executado.",
+                        extra=ev.data,
+                    )
+                elif ev.type == "signal_rejected":
+                    logger.warning(
+                        "Sinal rejeitado.",
+                        extra=ev.data,
+                    )
+                elif ev.type == "circuit_breaker":
+                    logger.error(
+                        "Circuit breaker disparado, encerrando loop.",
+                        extra=ev.data,
+                    )
+                    # encerra o loop principal
+                    return
+                elif ev.type == "error":
+                    logger.error("Erro na engine.", extra=ev.data)
 
-    # históricos p/ gráficos
-    st.session_state.price_history: List[Dict[str, float]] = []
-    st.session_state.pnl_history: List[Dict[str, float]] = []
-    st.session_state.trades: List[Dict[str, Any]] = []
+            # Se a engine foi parada por algum motivo interno, sai do loop
+            if not engine.running:
+                logger.warning("Engine em estado 'stopped'. Encerrando bot.")
+                break
 
-    # log simples de eventos (erros, rejeições etc.)
-    st.session_state.event_log: List[Dict[str, Any]] = []
-
-    # equity fictícia para lab (1000 + realized_pnl)
-    st.session_state.initial_equity = 1000.0
-
-
-def process_n_ticks(n: int):
-    """
-    Processa N ticks usando o engine e atualiza
-    histórico de preço, PnL, trades e log de eventos.
-    """
-    engine: TradingEngine = st.session_state.engine
-    data_iter = st.session_state.data_iter
-
-    for _ in range(n):
-        try:
-            tick = next(data_iter)
-        except StopIteration:
-            st.warning("Datafeed chegou ao fim (StopIteration).")
-            break
-
-        events: List[EngineEvent] = engine.process_tick(tick)
-        snap = engine.snapshot()
-
-        ts = float(tick.get("ts", 0.0))
-        last_price = float(tick.get("last", 0.0))
-
-        # Histórico de preço
-        st.session_state.price_history.append(
-            {"ts": ts, "last": last_price}
-        )
-
-        # PnL realizado do snapshot de posição
-        realized_pnl = float(snap["position"]["realized_pnl"])
-        equity = st.session_state.initial_equity + realized_pnl
-
-        st.session_state.pnl_history.append(
-            {"ts": ts, "realized_pnl": realized_pnl, "equity": equity}
-        )
-
-        # Eventos
-        for ev in events:
-            if ev.type == "trade_executed":
-                st.session_state.trades.append(ev.data)
-                st.session_state.event_log.append(
-                    {
-                        "ts": ts,
-                        "type": "trade_executed",
-                        "msg": f"{ev.data['side']} {ev.data['size']} @ {ev.data['price']}",
-                        "tag": ev.data.get("signal_tag"),
-                    }
-                )
-            elif ev.type == "signal_rejected":
-                st.session_state.event_log.append(
-                    {
-                        "ts": ts,
-                        "type": "signal_rejected",
-                        "msg": ev.data.get("reason", "") + " – " + ev.data.get("error", ""),
-                        "tag": ev.data.get("signal_tag"),
-                    }
-                )
-            elif ev.type == "circuit_breaker":
-                st.session_state.event_log.append(
-                    {
-                        "ts": ts,
-                        "type": "circuit_breaker",
-                        "msg": ev.data.get("message", ""),
-                        "tag": None,
-                    }
-                )
-                st.warning(f"Circuit breaker disparado: {ev.data.get('message')}")
-                return
-            elif ev.type == "error":
-                st.session_state.event_log.append(
-                    {
-                        "ts": ts,
-                        "type": "error",
-                        "msg": ev.data.get("message", ""),
-                        "tag": ev.data.get("signal_tag"),
-                    }
-                )
-                st.error(f"Erro na engine: {ev.data.get('message')}")
-
-
-def compute_metrics() -> Dict[str, float]:
-    """
-    Calcula métricas básicas a partir dos trades e da curva de PnL.
-    """
-    trades = st.session_state.trades
-    pnl_hist = st.session_state.pnl_history
-
-    total_trades = len(trades)
-    if total_trades == 0:
-        return {
-            "net_pnl": 0.0,
-            "win_rate": 0.0,
-            "max_drawdown": 0.0,
-            "total_trades": 0,
-        }
-
-    # PnL por trade
-    pnls = [float(t.get("trade_pnl", 0.0)) for t in trades]
-    wins = sum(1 for x in pnls if x > 0)
-    losses = sum(1 for x in pnls if x < 0)
-    win_rate = (wins / total_trades) * 100.0 if total_trades > 0 else 0.0
-    net_pnl = sum(pnls)
-
-    # Max drawdown na equity simulada
-    max_dd = 0.0
-    if pnl_hist:
-        eq_series = [row["equity"] for row in pnl_hist]
-        max_eq = eq_series[0]
-        for eq in eq_series:
-            if eq > max_eq:
-                max_eq = eq
-            dd = max_eq - eq
-            if dd > max_dd:
-                max_dd = dd
-
-    return {
-        "net_pnl": net_pnl,
-        "win_rate": win_rate,
-        "max_drawdown": max_dd,
-        "total_trades": total_trades,
-    }
-
-
-# ----------------- UI ----------------- #
-
-def main():
-    st.set_page_config(page_title="Robô HFT - Lab Streamlit", layout="wide")
-
-    st.title("🤖 Robô HFT – Laboratório em Streamlit (Modo Dummy)")
-
-    # Carrega YAML base
-    settings = load_settings("config/settings_example.yaml")
-    exchange_cfg = settings["exchange"]
-    yaml_strat_cfg = settings["strategy"]
-    yaml_strat_params = yaml_strat_cfg.get("params", {})
-
-    # Inicializa strategy_cfg na sessão, se ainda não existir
-    if "strategy_cfg" not in st.session_state:
-        st.session_state.strategy_cfg = {
-            "name": yaml_strat_cfg.get("name", "simple_maker_taker"),
-            "params": dict(yaml_strat_params),
-        }
-
-    # ------------------------------------------- #
-    # Sidebar: estratégia e parâmetros
-    # ------------------------------------------- #
-
-    st.sidebar.header("Configuração da Estratégia")
-
-    strategy_options = [
-        "simple_maker_taker",
-        "market_maker_v1",
-        "market_maker_v2",
-        "micro_momentum_v1",
-        "imbalance_v1",
-        "mean_reversion_v1",
-    ]
-
-    current_strategy_cfg = st.session_state.strategy_cfg
-    current_name = current_strategy_cfg.get("name", yaml_strat_cfg.get("name", "simple_maker_taker"))
-    current_params = current_strategy_cfg.get("params", yaml_strat_params)
-
-    strategy_name = st.sidebar.selectbox(
-        "Estratégia",
-        options=strategy_options,
-        index=strategy_options.index(current_name) if current_name in strategy_options else 0,
-    )
-
-    def param_value(key: str, default: float | int | str) -> Any:
-        if key in current_params:
-            return current_params[key]
-        if key in yaml_strat_params:
-            return yaml_strat_params[key]
-        return default
-
-    new_params: Dict[str, Any] = dict(current_params)
-
-    if strategy_name == "simple_maker_taker":
-        st.sidebar.markdown("**Simple Maker/Taker**")
-        new_params["min_spread"] = st.sidebar.number_input(
-            "min_spread", value=float(param_value("min_spread", 1.0)), step=0.1
-        )
-        new_params["order_size"] = st.sidebar.number_input(
-            "order_size", value=float(param_value("order_size", 0.001)), step=0.0001, format="%.6f"
-        )
-        new_params["tick_interval"] = st.sidebar.number_input(
-            "tick_interval", value=int(param_value("tick_interval", 5)), step=1, min_value=1
-        )
-
-    elif strategy_name == "market_maker_v1":
-        st.sidebar.markdown("**Market Maker V1**")
-        new_params["min_spread"] = st.sidebar.number_input(
-            "min_spread", value=float(param_value("min_spread", 1.0)), step=0.1
-        )
-        new_params["max_spread"] = st.sidebar.number_input(
-            "max_spread", value=float(param_value("max_spread", 10.0)), step=0.1
-        )
-        new_params["spread_pct"] = st.sidebar.number_input(
-            "spread_pct", value=float(param_value("spread_pct", 0.0)), step=0.0001, format="%.4f"
-        )
-        new_params["quote_size"] = st.sidebar.number_input(
-            "quote_size", value=float(param_value("quote_size", 0.001)), step=0.0001, format="%.6f"
-        )
-        new_params["tick_interval"] = st.sidebar.number_input(
-            "tick_interval", value=int(param_value("tick_interval", 5)), step=1, min_value=1
-        )
-
-    elif strategy_name == "market_maker_v2":
-        st.sidebar.markdown("**Market Maker V2 (adaptativo)**")
-        new_params["min_spread"] = st.sidebar.number_input(
-            "min_spread", value=float(param_value("min_spread", 1.0)), step=0.1
-        )
-        new_params["max_spread"] = st.sidebar.number_input(
-            "max_spread", value=float(param_value("max_spread", 15.0)), step=0.1
-        )
-        new_params["spread_pct"] = st.sidebar.number_input(
-            "spread_pct", value=float(param_value("spread_pct", 0.0)), step=0.0001, format="%.4f"
-        )
-        new_params["quote_size"] = st.sidebar.number_input(
-            "quote_size", value=float(param_value("quote_size", 0.001)), step=0.0001, format="%.6f"
-        )
-        new_params["tick_interval"] = st.sidebar.number_input(
-            "tick_interval", value=int(param_value("tick_interval", 5)), step=1, min_value=1
-        )
-        new_params["vol_window"] = st.sidebar.number_input(
-            "vol_window", value=int(param_value("vol_window", 50)), step=1, min_value=5
-        )
-        new_params["vol_factor"] = st.sidebar.number_input(
-            "vol_factor", value=float(param_value("vol_factor", 1.0)), step=0.1
-        )
-
-    elif strategy_name == "micro_momentum_v1":
-        st.sidebar.markdown("**Micro Momentum V1**")
-        new_params["lookback_ticks"] = st.sidebar.number_input(
-            "lookback_ticks", value=int(param_value("lookback_ticks", 10)), step=1, min_value=3
-        )
-        new_params["min_moves"] = st.sidebar.number_input(
-            "min_moves", value=int(param_value("min_moves", 3)), step=1, min_value=1
-        )
-        new_params["min_return"] = st.sidebar.number_input(
-            "min_return", value=float(param_value("min_return", 0.0005)), step=0.0001, format="%.4f"
-        )
-        new_params["order_size"] = st.sidebar.number_input(
-            "order_size", value=float(param_value("order_size", 0.001)), step=0.0001, format="%.6f"
-        )
-        new_params["cooldown_ticks"] = st.sidebar.number_input(
-            "cooldown_ticks", value=int(param_value("cooldown_ticks", 10)), step=1, min_value=0
-        )
-        new_params["side_bias"] = st.sidebar.selectbox(
-            "side_bias",
-            options=["both", "long_only", "short_only"],
-            index=["both", "long_only", "short_only"].index(
-                param_value("side_bias", "both")
-            ),
-        )
-
-    elif strategy_name == "imbalance_v1":
-        st.sidebar.markdown("**Imbalance V1**")
-        new_params["imbalance_threshold"] = st.sidebar.number_input(
-            "imbalance_threshold", value=float(param_value("imbalance_threshold", 0.6)), step=0.05
-        )
-        new_params["min_total_size"] = st.sidebar.number_input(
-            "min_total_size", value=float(param_value("min_total_size", 1.0)), step=0.1
-        )
-        new_params["imbalance_order_size"] = st.sidebar.number_input(
-            "imbalance_order_size", value=float(param_value("imbalance_order_size", 0.001)), step=0.0001, format="%.6f"
-        )
-        new_params["imbalance_cooldown_ticks"] = st.sidebar.number_input(
-            "imbalance_cooldown_ticks",
-            value=int(param_value("imbalance_cooldown_ticks", 5)),
-            step=1,
-            min_value=0,
-        )
-        new_params["imbalance_side_bias"] = st.sidebar.selectbox(
-            "imbalance_side_bias",
-            options=["both", "long_only", "short_only"],
-            index=["both", "long_only", "short_only"].index(
-                param_value("imbalance_side_bias", "both")
-            ),
-        )
-
-    elif strategy_name == "mean_reversion_v1":
-        st.sidebar.markdown("**Mean Reversion V1**")
-        new_params["mr_lookback_ticks"] = st.sidebar.number_input(
-            "mr_lookback_ticks", value=int(param_value("mr_lookback_ticks", 20)), step=1, min_value=5
-        )
-        new_params["mr_z_threshold"] = st.sidebar.number_input(
-            "mr_z_threshold", value=float(param_value("mr_z_threshold", 2.0)), step=0.1
-        )
-        new_params["mr_order_size"] = st.sidebar.number_input(
-            "mr_order_size", value=float(param_value("mr_order_size", 0.001)), step=0.0001, format="%.6f"
-        )
-        new_params["mr_cooldown_ticks"] = st.sidebar.number_input(
-            "mr_cooldown_ticks",
-            value=int(param_value("mr_cooldown_ticks", 10)),
-            step=1,
-            min_value=0,
-        )
-        new_params["mr_side_bias"] = st.sidebar.selectbox(
-            "mr_side_bias",
-            options=["both", "long_only", "short_only"],
-            index=["both", "long_only", "short_only"].index(
-                param_value("mr_side_bias", "both")
-            ),
-        )
-        new_params["mr_max_z_cap"] = st.sidebar.number_input(
-            "mr_max_z_cap", value=float(param_value("mr_max_z_cap", 5.0)), step=0.5
-        )
-
-    # Atualiza a strategy_cfg da sessão
-    st.session_state.strategy_cfg = {"name": strategy_name, "params": new_params}
-
-    # ------------------------------------------- #
-    # Inicialização do engine (primeira vez)
-    # ------------------------------------------- #
-
-    if "engine" not in st.session_state:
-        init_engine_and_data(st.session_state.strategy_cfg)
-
-    engine: TradingEngine = st.session_state.engine
-
-    # ------------------------------------------- #
-    # Controles de execução
-    # ------------------------------------------- #
-
-    st.sidebar.markdown("---")
-    st.sidebar.header("Execução (modo lab / dummy)")
-
-    st.sidebar.write(f"**Símbolo:** `{exchange_cfg['symbol']}`")
-    st.sidebar.write(f"**Provider (YAML):** `{exchange_cfg.get('provider', 'dummy')}`")
-    st.sidebar.write(f"**Datafeed (YAML):** `{exchange_cfg.get('datafeed', 'dummy')}`")
-    st.sidebar.write(f"**Estratégia ativa no engine:** `{st.session_state.strategy_cfg['name']}`")
-
-    step_ticks = st.sidebar.number_input(
-        "Nº de ticks por passo",
-        min_value=1,
-        max_value=5000,
-        value=100,
-        step=50,
-    )
-
-    col_b1, col_b2 = st.sidebar.columns(2)
-    if col_b1.button("▶ Rodar", use_container_width=True):
-        process_n_ticks(int(step_ticks))
-
-    if col_b2.button("🔁 Resetar (aplicar estratégia)", use_container_width=True):
-        init_engine_and_data(st.session_state.strategy_cfg)
-        st.rerun()  # <--- CORRIGIDO AQUI
-
-    st.sidebar.info(
-        "Ao alterar a estratégia ou parâmetros, clique em **Resetar** "
-        "para recriar o engine com essa configuração."
-    )
-
-    # Estado do engine
-    snap = engine.snapshot()
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Estado do Engine")
-    st.sidebar.write(f"Running: `{snap['running']}`")
-    st.sidebar.write(f"Ticks processados: `{snap['tick_count']}`")
-    st.sidebar.write(f"Trades executados: `{snap['trade_count']}`")
-    st.sidebar.write(f"Último preço: `{snap['last_price']}`")
-    st.sidebar.write(
-        f"Posição: `{snap['position']['qty']}` @ `{snap['position']['avg_price']}`"
-    )
-    st.sidebar.write(f"PnL realizado: `{snap['position']['realized_pnl']}`")
-    if snap["last_error"]:
-        st.sidebar.error(f"Erro recente: {snap['last_error']}")
-
-    # ------------------------------------------- #
-    # MÉTRICAS GERAIS (topo da página)
-    # ------------------------------------------- #
-
-    metrics = compute_metrics()
-    st.subheader("📊 Métricas gerais do robô (sessão atual)")
-
-    mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("PnL líquido", f"{metrics['net_pnl']:.4f}")
-    mc2.metric("Win rate", f"{metrics['win_rate']:.2f}%")
-    mc3.metric("Max Drawdown", f"{metrics['max_drawdown']:.4f}")
-    mc4.metric("Trades", metrics["total_trades"])
-
-    st.markdown("---")
-
-    # ----------------- Tabs principais ----------------- #
-
-    tab_price, tab_pnl, tab_trades, tab_signals, tab_events = st.tabs(
-        ["📈 Preço", "💰 PnL / Equity", "📜 Trades", "📡 Sinais", "📝 Eventos"]
-    )
-
-    # Tab preço
-    with tab_price:
-        st.subheader("Preço (last) ao longo dos ticks")
-        if st.session_state.price_history:
-            price_df = pd.DataFrame(st.session_state.price_history)
-            price_df = price_df.sort_values("ts").set_index("ts")
-            st.line_chart(price_df["last"])
-        else:
-            st.info("Ainda não há dados de preço. Clique em 'Rodar' na barra lateral.")
-
-    # Tab PnL / Equity
-    with tab_pnl:
-        st.subheader("PnL realizado e Equity (fictícia: 1000 + PnL)")
-        if st.session_state.pnl_history:
-            pnl_df = pd.DataFrame(st.session_state.pnl_history)
-            pnl_df = pnl_df.sort_values("ts").set_index("ts")
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write("PnL realizado")
-                st.line_chart(pnl_df["realized_pnl"])
-            with col2:
-                st.write("Equity (simulada)")
-                st.line_chart(pnl_df["equity"])
-        else:
-            st.info("Ainda não há PnL. Rode alguns ticks para ver os resultados.")
-
-    # Tab trades
-    with tab_trades:
-        st.subheader("Trades executados (simulados)")
-        if st.session_state.trades:
-            trades_df = pd.DataFrame(st.session_state.trades)
-            st.dataframe(trades_df)
-        else:
-            st.info("Nenhum trade executado ainda.")
-
-    # Tab sinais
-    with tab_signals:
-        st.subheader("Últimos sinais da estratégia (snapshot)")
-        last_signals = snap["last_signals"]
-        if last_signals:
-            sig_df = pd.DataFrame(last_signals)
-            st.dataframe(sig_df)
-        else:
-            st.info("Nenhum sinal gerado ainda ou ainda não processado.")
-
-    # Tab eventos
-    with tab_events:
-        st.subheader("Log de eventos (trades, rejeições, erros, circuit breaker)")
-        if st.session_state.event_log:
-            events_df = pd.DataFrame(st.session_state.event_log)
-            events_df = events_df.sort_values("ts", ascending=False)
-            st.dataframe(events_df)
-        else:
-            st.info("Nenhum evento registrado ainda.")
+    except KeyboardInterrupt:
+        logger.info("Bot interrompido pelo usuário.")
 
 
 if __name__ == "__main__":
