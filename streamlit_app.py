@@ -101,9 +101,22 @@ def process_n_ticks(n: int):
         ts = float(tick.get("ts", 0.0))
         last_price = float(tick.get("last", 0.0))
 
-        # Histórico de preço
+        # Se o feed fornecer bid/ask/tamanhos, usamos; senão, caímos para last/0
+        bid = float(tick.get("bid", last_price))
+        ask = float(tick.get("ask", last_price))
+        bid_size = float(tick.get("bid_size", 0.0))
+        ask_size = float(tick.get("ask_size", 0.0))
+
+        # Histórico de preço + book agregado
         st.session_state.price_history.append(
-            {"ts": ts, "last": last_price}
+            {
+                "ts": ts,
+                "last": last_price,
+                "bid": bid,
+                "ask": ask,
+                "bid_size": bid_size,
+                "ask_size": ask_size,
+            }
         )
 
         # PnL realizado do snapshot de posição
@@ -403,7 +416,6 @@ def main():
     exchange_override: Dict[str, Any] = dict(st.session_state.exchange_override)
 
     if provider == "dummy":
-        # tipo de feed dummy
         datafeed_default = base_exchange_cfg.get("datafeed", "dummy_orderbook")
         datafeed_current = exchange_override.get("datafeed", datafeed_default)
 
@@ -416,7 +428,6 @@ def main():
         )
         exchange_override["datafeed"] = datafeed_type
 
-        # parâmetros comuns
         start_price = st.sidebar.number_input(
             "Preço inicial (mid)",
             value=float(exchange_override.get("start_price", base_exchange_cfg.get("start_price", 100000.0))),
@@ -434,7 +445,6 @@ def main():
         exchange_override["start_price"] = start_price
         exchange_override["tick_sleep"] = tick_sleep
 
-        # parâmetros específicos do orderbook avançado
         if datafeed_type == "dummy_orderbook":
             volatility = st.sidebar.number_input(
                 "Volatilidade base (%)",
@@ -462,12 +472,11 @@ def main():
                 format="%.2f",
             )
 
-            exchange_override["volatility"] = volatility / 100.0  # converte % -> fração
+            exchange_override["volatility"] = volatility / 100.0
             exchange_override["base_spread_ticks"] = base_spread_ticks
             exchange_override["depth_levels"] = depth_levels
             exchange_override["base_liquidity"] = base_liquidity
 
-        # salva override na sessão
         st.session_state.exchange_override = exchange_override
     else:
         st.sidebar.info(
@@ -557,16 +566,38 @@ def main():
     # ----------------- Tabs principais ----------------- #
 
     tab_price, tab_pnl, tab_trades, tab_signals, tab_events = st.tabs(
-        ["📈 Preço", "💰 PnL / Equity", "📜 Trades", "📡 Sinais", "📝 Eventos"]
+        ["📈 Preço & Book", "💰 PnL / Equity", "📜 Trades", "📡 Sinais", "📝 Eventos"]
     )
 
-    # Tab preço
+    # Tab preço & book
     with tab_price:
-        st.subheader("Preço (last) ao longo dos ticks")
+        st.subheader("Preço (last, bid, ask) ao longo dos ticks")
         if st.session_state.price_history:
             price_df = pd.DataFrame(st.session_state.price_history)
             price_df = price_df.sort_values("ts").set_index("ts")
-            st.line_chart(price_df["last"])
+
+            # Gráfico de preços: last, bid, ask
+            cols_price = [c for c in ["last", "bid", "ask"] if c in price_df.columns]
+            if cols_price:
+                st.line_chart(price_df[cols_price])
+            else:
+                st.info("Sem dados de preço suficientes.")
+
+            # Imbalance do book ao longo do tempo
+            st.subheader("Imbalance do book ( (bid_size - ask_size) / (total) )")
+            if "bid_size" in price_df.columns and "ask_size" in price_df.columns:
+                df_imb = price_df[["bid_size", "ask_size"]].copy()
+                total = df_imb["bid_size"] + df_imb["ask_size"]
+                # evita divisão por zero
+                df_imb["imbalance"] = 0.0
+                nonzero = total > 0
+                df_imb.loc[nonzero, "imbalance"] = (
+                    (df_imb.loc[nonzero, "bid_size"] - df_imb.loc[nonzero, "ask_size"])
+                    / total.loc[nonzero]
+                )
+                st.line_chart(df_imb["imbalance"])
+            else:
+                st.info("Sem dados de tamanho de book para calcular imbalance.")
         else:
             st.info("Ainda não há dados de preço. Clique em 'Rodar' na barra lateral.")
 
