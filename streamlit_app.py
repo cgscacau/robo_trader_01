@@ -220,9 +220,27 @@ def compute_metrics() -> Dict[str, float]:
 def main():
     st.set_page_config(page_title="Robô HFT - Lab Streamlit", layout="wide")
 
-    # 1) Carrega YAML + identifica ambiente
-    settings = load_settings()
-    env_name = settings.get("env", "lab_dummy")
+    # --- 0) Seleção de ambiente na sidebar ---
+    env_label_to_name = {
+        "LAB / Dummy": "lab_dummy",
+        "Binance Testnet": "binance_testnet",
+        "Binance LIVE": "binance_live",
+    }
+
+    if "env_label" not in st.session_state:
+        st.session_state.env_label = "LAB / Dummy"
+
+    st.sidebar.header("Ambiente")
+    selected_label = st.sidebar.radio(
+        "Selecione o ambiente",
+        list(env_label_to_name.keys()),
+        index=list(env_label_to_name.keys()).index(st.session_state.env_label),
+    )
+    st.session_state.env_label = selected_label
+    env_name = env_label_to_name[selected_label]
+
+    # 1) Carrega YAML do ambiente escolhido na UI
+    settings = load_settings(env_name_override=env_name)
 
     base_exchange_cfg = settings["exchange"]
     yaml_strat_cfg = settings["strategy"]
@@ -249,17 +267,6 @@ def main():
         st.caption(f"Ambiente atual: **{env_name}**")
 
     st.markdown("---")
-
-    # 3) Estratégia em sessão (para manter ao trocar widgets)
-    if "strategy_cfg" not in st.session_state:
-        st.session_state.strategy_cfg = {
-            "name": yaml_strat_cfg.get("name", "simple_maker_taker"),
-            "params": dict(yaml_strat_params),
-        }
-
-    # 4) Exchange override (apenas para provider dummy; em Binance é ignorado)
-    if "exchange_override" not in st.session_state:
-        st.session_state.exchange_override = {}
 
     # ------------------------------------------------------------------ #
     # Sidebar: estratégia e parâmetros
@@ -679,3 +686,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
