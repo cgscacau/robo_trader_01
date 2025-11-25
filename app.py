@@ -81,39 +81,50 @@ def _apply_env_hardening(settings: Dict[str, Any], env_name: str) -> Dict[str, A
     return settings
 
 
-def load_settings(path: str | None = None) -> Dict[str, Any]:
+def load_settings(
+    path: str | None = None,
+    env_name_override: str | None = None,
+) -> Dict[str, Any]:
     """
     Carrega o YAML de configuração.
 
-    - Se `path` for fornecido, usa esse caminho relativo ao diretório do app.
-    - Caso contrário, escolhe o arquivo com base em APP_ENV:
-        * lab_dummy
-        * binance_testnet
-        * binance_live
+    - Se `env_name_override` for fornecido (caso do Streamlit),
+      usamos esse ambiente e escolhemos o arquivo pelo CONFIG_MAP.
+    - Se não for fornecido, usamos APP_ENV (modo CLI / linha de comando).
+    - Se `path` for fornecido, usamos esse caminho relativo ao diretório do app.
 
-    Usa caminho ABSOLUTO baseado no diretório do app.py,
-    para não depender do diretório corrente do processo.
+    Usa caminho ABSOLUTO baseado no diretório do app.py.
     """
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
-    if path is None:
-        env_name = os.getenv("APP_ENV", "lab_dummy")
-        cfg_rel_path = CONFIG_MAP.get(env_name, CONFIG_MAP["lab_dummy"])
+    # 1) Determina o ambiente
+    if env_name_override is not None:
+        env_name = env_name_override
+        if path is None:
+            cfg_rel_path = CONFIG_MAP.get(env_name, CONFIG_MAP["lab_dummy"])
+        else:
+            cfg_rel_path = path
     else:
         env_name = os.getenv("APP_ENV", "lab_dummy")
-        cfg_rel_path = path
+        if path is None:
+            cfg_rel_path = CONFIG_MAP.get(env_name, CONFIG_MAP["lab_dummy"])
+        else:
+            cfg_rel_path = path
 
+    # 2) Monta caminho absoluto do YAML
     cfg_path = os.path.join(base_dir, cfg_rel_path)
 
     if not os.path.exists(cfg_path):
         raise FileNotFoundError(f"Arquivo de configuração não encontrado: {cfg_path}")
 
+    # 3) Lê o YAML e aplica endurecimento de segurança
     with open(cfg_path, "r", encoding="utf-8") as f:
         settings = yaml.safe_load(f)
 
     settings["env"] = env_name
     settings = _apply_env_hardening(settings, env_name)
     return settings
+
 
 
 
@@ -386,4 +397,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
