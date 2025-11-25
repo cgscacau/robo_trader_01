@@ -1,0 +1,45 @@
+env: binance_testnet
+
+exchange:
+  provider: binance
+  datafeed: ws              # "ws" = WebSocket (tempo real) | "rest" = snapshots
+  symbol: BTCUSDT
+  market_type: futures      # ou "spot" se quiser spot
+  depth_levels: 10
+  ws_speed: "100ms"         # 100ms, 250ms, etc.
+
+  # URLs opcionais (podem ser deixadas em branco; a classe usa defaults internos)
+  ws_base_url_spot: ""
+  ws_base_url_futures: ""
+
+  # CREDENCIAIS DA BINANCE TESTNET (substituir por valores reais)
+  api_key: "SUA_API_KEY_TESTNET"
+  api_secret: "SEU_API_SECRET_TESTNET"
+
+  testnet: true
+  recv_window: 5000
+
+strategy:
+  name: simple_maker_taker
+  params:
+    min_spread: 0.5
+    order_size: 0.001
+    tick_interval: 5
+
+risk:
+  max_daily_loss_pct: 5.0
+  max_daily_loss_value: 100.0
+  max_position_size_pct: 10.0
+  max_open_trades: 20
+  circuit_breaker:
+    enabled: true
+  inventory:
+    max_abs_qty: 0.01
+    max_notional_pct: 30.0
+
+trading:
+  dry_run: true   # mesmo na testnet vamos manter dry_run por padrão
+
+logging:
+  level: INFO
+  json: true
