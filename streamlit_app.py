@@ -217,8 +217,7 @@ def compute_metrics() -> Dict[str, float]:
 def main():
     st.set_page_config(page_title="Robô HFT - Lab Streamlit", layout="wide")
 
-    st.title("🤖 Robô HFT – Laboratório em Streamlit (Modo Dummy)")
-    
+      
     if env_name == "lab_dummy":
         st.caption("Ambiente atual: **LAB / Dummy** (simulação completa).")
     elif env_name == "binance_testnet":
@@ -228,6 +227,8 @@ def main():
                  "Ordens reais SÓ são enviadas se variáveis de ambiente de confirmação permitirem.")
     else:
         st.caption(f"Ambiente atual: **{env_name}**")
+
+    st.title("🤖 Robô HFT – Laboratório em Streamlit (Modo Dummy)")
 
     
     # Carrega YAML base
@@ -662,4 +663,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
