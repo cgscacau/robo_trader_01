@@ -83,15 +83,30 @@ def _apply_env_hardening(settings: Dict[str, Any], env_name: str) -> Dict[str, A
 
 def load_settings(path: str | None = None) -> Dict[str, Any]:
     """
-    Carrega o YAML de configuração escolhendo o arquivo com base em APP_ENV,
-    a menos que um caminho explícito seja fornecido.
+    Carrega o YAML de configuração.
+
+    - Se `path` for fornecido, usa esse caminho relativo ao diretório do app.
+    - Caso contrário, escolhe o arquivo com base em APP_ENV:
+        * lab_dummy
+        * binance_testnet
+        * binance_live
+
+    Usa caminho ABSOLUTO baseado no diretório do app.py,
+    para não depender do diretório corrente do processo.
     """
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+
     if path is None:
         env_name = os.getenv("APP_ENV", "lab_dummy")
-        cfg_path = CONFIG_MAP.get(env_name, CONFIG_MAP["lab_dummy"])
+        cfg_rel_path = CONFIG_MAP.get(env_name, CONFIG_MAP["lab_dummy"])
     else:
         env_name = os.getenv("APP_ENV", "lab_dummy")
-        cfg_path = path
+        cfg_rel_path = path
+
+    cfg_path = os.path.join(base_dir, cfg_rel_path)
+
+    if not os.path.exists(cfg_path):
+        raise FileNotFoundError(f"Arquivo de configuração não encontrado: {cfg_path}")
 
     with open(cfg_path, "r", encoding="utf-8") as f:
         settings = yaml.safe_load(f)
@@ -99,6 +114,7 @@ def load_settings(path: str | None = None) -> Dict[str, Any]:
     settings["env"] = env_name
     settings = _apply_env_hardening(settings, env_name)
     return settings
+
 
 
 # ------------------------------------------------------------------ #
@@ -370,3 +386,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
