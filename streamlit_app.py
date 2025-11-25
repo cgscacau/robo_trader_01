@@ -29,7 +29,8 @@ def init_engine_and_data(
       - strategy_cfg vindo da UI
       - exchange_cfg = YAML + override vindo da UI (para provider dummy)
     """
-    settings = load_settings("config/settings_example.yaml")
+    settings = load_settings()
+    env_name = settings.get("env", "lab_dummy")
 
     base_exchange_cfg = settings["exchange"]
     risk_cfg = settings["risk"]
@@ -217,7 +218,18 @@ def main():
     st.set_page_config(page_title="Robô HFT - Lab Streamlit", layout="wide")
 
     st.title("🤖 Robô HFT – Laboratório em Streamlit (Modo Dummy)")
+    
+    if env_name == "lab_dummy":
+        st.caption("Ambiente atual: **LAB / Dummy** (simulação completa).")
+    elif env_name == "binance_testnet":
+        st.caption("Ambiente atual: **Binance Testnet** – dados reais, ordens em conta de teste (dry_run por padrão).")
+    elif env_name == "binance_live":
+        st.error("⚠ Ambiente atual: **Binance LIVE** – use SOMENTE após todos os testes. "
+                 "Ordens reais SÓ são enviadas se variáveis de ambiente de confirmação permitirem.")
+    else:
+        st.caption(f"Ambiente atual: **{env_name}**")
 
+    
     # Carrega YAML base
     settings = load_settings("config/settings_example.yaml")
     base_exchange_cfg = settings["exchange"]
@@ -650,3 +662,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
