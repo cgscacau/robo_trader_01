@@ -1,0 +1,47 @@
+env: binance_live
+
+exchange:
+  provider: binance
+  datafeed: ws
+  symbol: BTCUSDT
+  market_type: futures
+  depth_levels: 10
+  ws_speed: "100ms"
+
+  ws_base_url_spot: ""
+  ws_base_url_futures: ""
+
+  # CREDENCIAIS DA BINANCE REAL – preencha com muito cuidado
+  api_key: "SUA_API_KEY_REAL"
+  api_secret: "SEU_API_SECRET_REAL"
+
+  testnet: false
+  recv_window: 5000
+
+strategy:
+  name: simple_maker_taker
+  params:
+    min_spread: 0.5
+    order_size: 0.001
+    tick_interval: 5
+
+risk:
+  max_daily_loss_pct: 2.0
+  max_daily_loss_value: 50.0
+  max_position_size_pct: 5.0
+  max_open_trades: 10
+  circuit_breaker:
+    enabled: true       # o código ainda reforça isso
+  inventory:
+    max_abs_qty: 0.005
+    max_notional_pct: 20.0
+
+trading:
+  # Mesmo se você colocar false aqui, o código SÓ vai permitir ordens reais
+  # se as variáveis de ambiente ALLOW_REAL_TRADING e CONFIRM_I_UNDERSTAND_RISK
+  # estiverem setadas corretamente.
+  dry_run: true
+
+logging:
+  level: INFO
+  json: true
