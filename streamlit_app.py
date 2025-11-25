@@ -17,7 +17,7 @@ from core.engine import TradingEngine, EngineEvent
 from core.position import PositionManager
 
 
-# ----------------- Helpers ----------------- #
+# ========================= Helpers de inicialização ========================= #
 
 def init_engine_and_data(
     strategy_cfg: Dict[str, Any],
@@ -28,9 +28,11 @@ def init_engine_and_data(
     usando:
       - strategy_cfg vindo da UI
       - exchange_cfg = YAML + override vindo da UI (para provider dummy)
+
+    Esse método SEMPRE lê o settings pelo load_settings(), o que garante
+    que o ambiente (lab_dummy / binance_testnet / binance_live) seja respeitado.
     """
     settings = load_settings()
-    env_name = settings.get("env", "lab_dummy")
 
     base_exchange_cfg = settings["exchange"]
     risk_cfg = settings["risk"]
@@ -65,6 +67,7 @@ def init_engine_and_data(
     datafeed = build_datafeed(exchange_cfg)
     data_iter = datafeed.ticks()
 
+    # Guarda no estado da sessão
     st.session_state.engine = engine
     st.session_state.data_iter = data_iter
 
@@ -212,47 +215,55 @@ def compute_metrics() -> Dict[str, float]:
     }
 
 
-# ----------------- UI ----------------- #
+# ========================= UI principal ========================= #
 
 def main():
     st.set_page_config(page_title="Robô HFT - Lab Streamlit", layout="wide")
 
-      
-    if env_name == "lab_dummy":
-        st.caption("Ambiente atual: **LAB / Dummy** (simulação completa).")
-    elif env_name == "binance_testnet":
-        st.caption("Ambiente atual: **Binance Testnet** – dados reais, ordens em conta de teste (dry_run por padrão).")
-    elif env_name == "binance_live":
-        st.error("⚠ Ambiente atual: **Binance LIVE** – use SOMENTE após todos os testes. "
-                 "Ordens reais SÓ são enviadas se variáveis de ambiente de confirmação permitirem.")
-    else:
-        st.caption(f"Ambiente atual: **{env_name}**")
+    # 1) Carrega YAML + identifica ambiente
+    settings = load_settings()
+    env_name = settings.get("env", "lab_dummy")
 
-    st.title("🤖 Robô HFT – Laboratório em Streamlit (Modo Dummy)")
-
-    
-    # Carrega YAML base
-    settings = load_settings("config/settings_example.yaml")
     base_exchange_cfg = settings["exchange"]
     yaml_strat_cfg = settings["strategy"]
     yaml_strat_params = yaml_strat_cfg.get("params", {})
 
     provider = base_exchange_cfg.get("provider", "dummy")
 
-    # Inicializa strategy_cfg na sessão, se ainda não existir
+    # 2) Título + banner de ambiente
+    st.title("🤖 Robô HFT – Laboratório em Streamlit")
+
+    if env_name == "lab_dummy":
+        st.caption("Ambiente atual: **LAB / Dummy** (simulação completa).")
+    elif env_name == "binance_testnet":
+        st.caption(
+            "Ambiente atual: **Binance Testnet** – dados reais, ordens em conta de teste "
+            "(por padrão em `dry_run`)."
+        )
+    elif env_name == "binance_live":
+        st.error(
+            "⚠ Ambiente atual: **Binance LIVE** – use SOMENTE após todos os testes.\n"
+            "Ordens reais SÓ são enviadas se variáveis de ambiente obrigatórias estiverem habilitadas."
+        )
+    else:
+        st.caption(f"Ambiente atual: **{env_name}**")
+
+    st.markdown("---")
+
+    # 3) Estratégia em sessão (para manter ao trocar widgets)
     if "strategy_cfg" not in st.session_state:
         st.session_state.strategy_cfg = {
             "name": yaml_strat_cfg.get("name", "simple_maker_taker"),
             "params": dict(yaml_strat_params),
         }
 
-    # Inicializa override de exchange na sessão (para provider dummy)
+    # 4) Exchange override (apenas para provider dummy; em Binance é ignorado)
     if "exchange_override" not in st.session_state:
         st.session_state.exchange_override = {}
 
-    # ------------------------------------------- #
+    # ------------------------------------------------------------------ #
     # Sidebar: estratégia e parâmetros
-    # ------------------------------------------- #
+    # ------------------------------------------------------------------ #
 
     st.sidebar.header("Configuração da Estratégia")
 
@@ -283,6 +294,8 @@ def main():
         return default
 
     new_params: Dict[str, Any] = dict(current_params)
+
+    # ---- Parâmetros por estratégia (UI) ---- #
 
     if strategy_name == "simple_maker_taker":
         st.sidebar.markdown("**Simple Maker/Taker**")
@@ -419,16 +432,18 @@ def main():
     # Atualiza a strategy_cfg da sessão
     st.session_state.strategy_cfg = {"name": strategy_name, "params": new_params}
 
-    # ------------------------------------------- #
+    # ------------------------------------------------------------------ #
     # Sidebar: parâmetros de mercado (apenas dummy)
-    # ------------------------------------------- #
+    # ------------------------------------------------------------------ #
 
     st.sidebar.markdown("---")
-    st.sidebar.header("Mercado (modo dummy)")
+    st.sidebar.header("Mercado")
 
     exchange_override: Dict[str, Any] = dict(st.session_state.exchange_override)
 
     if provider == "dummy":
+        st.sidebar.caption("Ambiente de mercado editável (modo dummy).")
+
         datafeed_default = base_exchange_cfg.get("datafeed", "dummy_orderbook")
         datafeed_current = exchange_override.get("datafeed", datafeed_default)
 
@@ -491,15 +506,16 @@ def main():
             exchange_override["base_liquidity"] = base_liquidity
 
         st.session_state.exchange_override = exchange_override
+
     else:
-        st.sidebar.info(
-            "Parâmetros de mercado só são editáveis em modo dummy.\n"
-            "Para Binance / produção, use o YAML."
+        st.sidebar.caption(
+            "Parâmetros de mercado são definidos pelo YAML (Binance). "
+            "Use APP_ENV + arquivos settings_*.yaml para trocar ambiente."
         )
 
-    # ------------------------------------------- #
+    # ------------------------------------------------------------------ #
     # Inicialização do engine (primeira vez)
-    # ------------------------------------------- #
+    # ------------------------------------------------------------------ #
 
     if "engine" not in st.session_state:
         init_engine_and_data(
@@ -510,12 +526,12 @@ def main():
     engine: TradingEngine = st.session_state.engine
     effective_exchange_cfg = st.session_state.get("exchange_effective_cfg", base_exchange_cfg)
 
-    # ------------------------------------------- #
+    # ------------------------------------------------------------------ #
     # Controles de execução
-    # ------------------------------------------- #
+    # ------------------------------------------------------------------ #
 
     st.sidebar.markdown("---")
-    st.sidebar.header("Execução (modo lab / dummy)")
+    st.sidebar.header("Execução (modo lab / dummy / binance)")
 
     st.sidebar.write(f"**Símbolo:** `{effective_exchange_cfg['symbol']}`")
     st.sidebar.write(f"**Provider (YAML):** `{base_exchange_cfg.get('provider', 'dummy')}`")
@@ -542,7 +558,7 @@ def main():
         st.rerun()
 
     st.sidebar.info(
-        "Ao alterar estratégia ou parâmetros de mercado, clique em **Resetar** "
+        "Ao alterar estratégia ou parâmetros de mercado (dummy), clique em **Resetar** "
         "para recriar o engine com essa configuração."
     )
 
@@ -561,9 +577,9 @@ def main():
     if snap["last_error"]:
         st.sidebar.error(f"Erro recente: {snap['last_error']}")
 
-    # ------------------------------------------- #
+    # ------------------------------------------------------------------ #
     # MÉTRICAS GERAIS (topo da página)
-    # ------------------------------------------- #
+    # ------------------------------------------------------------------ #
 
     metrics = compute_metrics()
     st.subheader("📊 Métricas gerais do robô (sessão atual)")
@@ -576,7 +592,9 @@ def main():
 
     st.markdown("---")
 
-    # ----------------- Tabs principais ----------------- #
+    # ------------------------------------------------------------------ #
+    # Tabs principais
+    # ------------------------------------------------------------------ #
 
     tab_price, tab_pnl, tab_trades, tab_signals, tab_events = st.tabs(
         ["📈 Preço & Book", "💰 PnL / Equity", "📜 Trades", "📡 Sinais", "📝 Eventos"]
@@ -589,7 +607,6 @@ def main():
             price_df = pd.DataFrame(st.session_state.price_history)
             price_df = price_df.sort_values("ts").set_index("ts")
 
-            # Gráfico de preços: last, bid, ask
             cols_price = [c for c in ["last", "bid", "ask"] if c in price_df.columns]
             if cols_price:
                 st.line_chart(price_df[cols_price])
@@ -601,7 +618,6 @@ def main():
             if "bid_size" in price_df.columns and "ask_size" in price_df.columns:
                 df_imb = price_df[["bid_size", "ask_size"]].copy()
                 total = df_imb["bid_size"] + df_imb["ask_size"]
-                # evita divisão por zero
                 df_imb["imbalance"] = 0.0
                 nonzero = total > 0
                 df_imb.loc[nonzero, "imbalance"] = (
@@ -663,5 +679,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
