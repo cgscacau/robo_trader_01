@@ -1,0 +1,38 @@
+env: lab_dummy
+
+exchange:
+  provider: dummy
+  datafeed: dummy_orderbook        # dummy ou dummy_orderbook
+  symbol: BTCUSDT
+  start_price: 100000.0
+  tick_sleep: 0.0                  # 0 = roda o mais rápido possível
+  volatility: 0.0005               # 0.05% por tick
+  base_spread_ticks: 1.0
+  depth_levels: 5
+  base_liquidity: 1.0
+  seed: 42
+
+strategy:
+  name: simple_maker_taker
+  params:
+    min_spread: 1.0
+    order_size: 0.001
+    tick_interval: 5
+
+risk:
+  max_daily_loss_pct: 50.0
+  max_daily_loss_value: 100000.0
+  max_position_size_pct: 50.0
+  max_open_trades: 100
+  circuit_breaker:
+    enabled: true
+  inventory:
+    max_abs_qty: 1.0
+    max_notional_pct: 100.0
+
+trading:
+  dry_run: true
+
+logging:
+  level: INFO
+  json: false
