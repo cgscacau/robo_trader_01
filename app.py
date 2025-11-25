@@ -1,17 +1,12 @@
 # app.py
 
-import yaml
-import logging
-
-from core.risk import RiskLimits, R# app.py
-
 import os
 import yaml
 import logging
 from typing import Dict, Any
 
 from core.risk import RiskLimits, RiskManager
-from core.execution import ExecutionClient   # mock genérico
+from core.execution import ExecutionClient
 from core.datafeed import DummyDataFeed
 from core.datafeed_binance import BinanceDepthDataFeed
 from core.datafeed_ws_binance import BinanceWebSocketDataFeed
@@ -20,9 +15,7 @@ from core.position import PositionManager
 from core.inventory import InventoryLimits, InventoryRiskManager
 from core.logging_utils import setup_logging
 from core.engine import TradingEngine, EngineEvent
-
 from core.datafeed_dummy_orderbook import UltraDummyOrderBookFeed
-
 from strategies.simple_maker_taker import (
     SimpleMakerTakerStrategy,
     SimpleMakerTakerConfig,
@@ -758,4 +751,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
